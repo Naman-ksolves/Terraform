@@ -1,72 +1,64 @@
 provider "aws" {
-  region = var.aws_region
+  access_key = var.aws_access_key
+  secret_key = var.aws_secret_key
+  region     = var.aws_region
 }
 
-# VPC
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
+data "aws_vpc" "default" {
+  default = true
 }
 
-# Internet Gateway for Public Subnets
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
+data "aws_subnet" "default" {
+  vpc_id            = data.aws_vpc.default.id
+  availability_zone = var.aws_availability_zone
 }
 
-# Public Route Table
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.main.id
+resource "aws_instance" "example" {
+  count             = 3
+  ami               = "ami-0e35ddab05955cf57"  # Example AMI
+  instance_type     = "t3.medium"
+  key_name          = var.key_name
+  subnet_id         = data.aws_subnet.default.id
+  tags = {
+    Name = "Naman-k8-${count.index + 1}"
+  }
 }
 
-# Route for Public Subnets
-resource "aws_route" "public_internet_access" {
-  route_table_id         = aws_route_table.public_rt.id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.igw.id
+# Output the public and private IPs of the instances
+output "instance_ips" {
+  value = {
+    for idx, instance in aws_instance.example :
+    instance.id => {
+      public_ip  = instance.public_ip
+      private_ip = instance.private_ip
+    }
+  }
 }
 
-# Private Subnets
-resource "aws_subnet" "private" {
-  count                   = length(var.private_subnet_cidrs)
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.private_subnet_cidrs[count.index]
-  map_public_ip_on_launch = false
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
-}
-
-# Public Subnets (Needed for ALB)
-resource "aws_subnet" "public" {
-  count                   = length(var.public_subnet_cidrs)
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidrs[count.index]
-  map_public_ip_on_launch = true
-  availability_zone       = element(data.aws_availability_zones.available.names, count.index)
-}
-
-# Associate Public Subnets with Public Route Table
-resource "aws_route_table_association" "public" {
-  count          = length(aws_subnet.public[*].id)
-  subnet_id      = aws_subnet.public[count.index].id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-# ALB Security Group
-resource "aws_security_group" "alb_sg" {
-  vpc_id = aws_vpc.main.id
+# Security Group for Instance 1 (X)
+resource "aws_security_group" "sg_instance_1" {
+  name        = "sg-instance-1"
+  description = "Allow traffic from instance 2 and 3, SSH from 14.97.80.222, and specific IP"
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 0
+    to_port     = 65535
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [
+      "${aws_instance.example[1].public_ip}/32",  # Public IP of instance 2
+      "${aws_instance.example[1].private_ip}/32", # Private IP of instance 2
+      "${aws_instance.example[2].public_ip}/32",  # Public IP of instance 3
+      "${aws_instance.example[2].private_ip}/32", # Private IP of instance 3
+      "14.97.80.222/32"                          # Specific IP you mentioned
+    ]
   }
 
+  # SSH ingress rule for your IP
   ingress {
-    from_port   = 443
-    to_port     = 443
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["14.97.80.222/32"]  # Your IP for SSH access
   }
 
   egress {
@@ -77,15 +69,30 @@ resource "aws_security_group" "alb_sg" {
   }
 }
 
-# ASG Security Group
-resource "aws_security_group" "asg_sg" {
-  vpc_id = aws_vpc.main.id
+# Security Group for Instance 2 (Y)
+resource "aws_security_group" "sg_instance_2" {
+  name        = "sg-instance-2"
+  description = "Allow traffic from instance 1 and 3, SSH from 14.97.80.222, and specific IP"
 
   ingress {
-    from_port       = 0
-    to_port         = 65535
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb_sg.id]
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    cidr_blocks = [
+      "${aws_instance.example[0].public_ip}/32",  # Public IP of instance 1
+      "${aws_instance.example[0].private_ip}/32", # Private IP of instance 1
+      "${aws_instance.example[2].public_ip}/32",  # Public IP of instance 3
+      "${aws_instance.example[2].private_ip}/32", # Private IP of instance 3
+      "14.97.80.222/32"                          # Specific IP you mentioned
+    ]
+  }
+
+  # SSH ingress rule for your IP
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["14.97.80.222/32"]  # Your IP for SSH access
   }
 
   egress {
@@ -96,111 +103,36 @@ resource "aws_security_group" "asg_sg" {
   }
 }
 
-# EKS IAM Role
-resource "aws_iam_role" "eks_role" {
-  name = "eks-cluster-role"
+# Security Group for Instance 3 (Z)
+resource "aws_security_group" "sg_instance_3" {
+  name        = "sg-instance-3"
+  description = "Allow traffic from instance 1 and 2, SSH from 14.97.80.222, and specific IP"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Action = "sts:AssumeRole",
-      Effect = "Allow",
-      Principal = {
-        Service = "eks.amazonaws.com"
-      }
-    }]
-  })
-}
+  ingress {
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    cidr_blocks = [
+      "${aws_instance.example[0].public_ip}/32",  # Public IP of instance 1
+      "${aws_instance.example[0].private_ip}/32", # Private IP of instance 1
+      "${aws_instance.example[1].public_ip}/32",  # Public IP of instance 2
+      "${aws_instance.example[1].private_ip}/32", # Private IP of instance 2
+      "14.97.80.222/32"                          # Specific IP you mentioned
+    ]
+  }
 
-resource "aws_iam_role_policy_attachment" "eks_policy" {
-  role       = aws_iam_role.eks_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-}
+  # SSH ingress rule for your IP
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["14.97.80.222/32"]  # Your IP for SSH access
+  }
 
-# EKS Cluster
-resource "aws_eks_cluster" "eks" {
-  name     = var.eks_cluster_name
-  role_arn = aws_iam_role.eks_role.arn
-  vpc_config {
-    subnet_ids = aws_subnet.private[*].id
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
-
-# ALB
-resource "aws_lb" "alb" {
-  name               = var.alb_name
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = aws_subnet.public[*].id
-}
-
-# Fetch latest AMI dynamically
-data "aws_ami" "latest_ami" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-}
-
-# Launch Template
-resource "aws_launch_template" "asg_lt" {
-  name_prefix   = "asg-template"
-  image_id      = data.aws_ami.latest_ami.id
-  instance_type = var.instance_type
-  key_name      = var.key_name
-
-  network_interfaces {
-    associate_public_ip_address = false
-    security_groups             = [aws_security_group.asg_sg.id]
-  }
-}
-
-# Auto Scaling Group
-resource "aws_autoscaling_group" "asg" {
-  desired_capacity    = var.asg_desired_capacity
-  max_size            = var.asg_max_size
-  min_size            = var.asg_min_size
-  vpc_zone_identifier = aws_subnet.private[*].id
-
-  launch_template {
-    id      = aws_launch_template.asg_lt.id
-    version = "$Latest"
-  }
-}
-
-# API Gateway
-resource "aws_api_gateway_rest_api" "api" {
-  name = var.api_gateway_name
-}
-
-# Cognito User Pool
-resource "aws_cognito_user_pool" "user_pool" {
-  name = var.cognito_user_pool_name
-}
-
-# Route 53
-resource "aws_route53_zone" "main" {
-  name = var.route53_domain
-}
-
-# WAF
-resource "aws_waf_web_acl" "waf" {
-  name        = var.waf_name
-  metric_name = var.waf_metric_name
-
-  default_action {
-    type = "ALLOW"
-  }
-}
-
-# Outputs
-output "eks_cluster_id" {
-  value = aws_eks_cluster.eks.id
-}
-
-# Data Source for AZs
-data "aws_availability_zones" "available" {}
